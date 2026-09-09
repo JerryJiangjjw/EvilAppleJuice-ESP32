@@ -62,6 +62,37 @@ And it makes these random choices every time it runs (default re-advertise every
 
 Given the 29 devices and the 3 advertisement types, there are a total of 87 unique possible advertisements (ignoring the random source MAC) possible, of which one is broadcast every second.
 
+## Fork 新增功能（New in this fork）
+
+本分支在原作基础上，针对 **ESP32-S3-DevKitC-1** 做了适配与简化：
+
+### 硬件适配
+
+* `platformio.ini` 新增 `esp32s3` 编译环境（目标板 `esp32-s3-devkitc-1`，Arduino 框架）
+* 使用板载 **RGB LED（WS2812，GPIO48）** 作为状态指示灯（依赖 Adafruit NeoPixel，已声明于 `lib_deps`）
+* 控制按键复用板载 **BOOT 键（GPIO0）**，无需外接按键
+
+### 操作方式
+
+| 操作 | 功能 |
+|------|------|
+| 短按 BOOT | 切换广播模式：**模式 1 = 固定 AirPods**（轰炸效果最强）/ **模式 2 = 随机设备**（29 种设备随机轮换） |
+| 长按 BOOT（≥1 秒） | 电源开关：关闭后立即停止广播 |
+| 状态记忆 | 开关与模式存入 flash（Preferences），断电/重启后保持上次状态 |
+
+### 指示灯
+
+| 状态 | 灯光 |
+|------|------|
+| 电源关闭 | 灯灭 |
+| 模式 1（AirPods） | 红色闪烁 |
+| 模式 2（随机） | 随机变色闪烁 |
+
+### 注意事项
+
+* **上电/复位瞬间按住 BOOT 键会进入下载模式**（GPIO0 为启动引导引脚）；正常开机后再按键才是模式/电源控制
+* 原作 9 种双 LED 组合模式（`led.hpp` 状态表）已移除，简化为「2 模式 + 电源开关」，普通 GPIO LED 不再使用
+
 ## Usage
 
 Clone the repo, and easiest would be to use VS Code w/ PlatformIO to upload it to your ESP32.

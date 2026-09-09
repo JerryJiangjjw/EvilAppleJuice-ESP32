@@ -12,6 +12,7 @@
 
 #include "devices.hpp"
 #include "led.hpp"
+#include "rgb.hpp"
 
 // Bluetooth maximum transmit power
 #if defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32C2) || defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -30,7 +31,9 @@ Preferences preferences;
 
 #define RIGHT_LED 12
 #define LEFT_LED 13
-const int BOOT_BUTTON_PIN = 9;
+// ESP32-S3 开发板载 BOOT 按键接 GPIO0（按下为低电平）
+// 注意：复位/上电瞬间按住 GPIO0 会进入下载模式，正常运行时按则是切换模式
+const int BOOT_BUTTON_PIN = 0;
 const unsigned long LONG_PRESS_TIME = 1000; // 1 seconds
 
 void setup() {
@@ -45,11 +48,14 @@ void setup() {
   Serial.printf("Current Mode: %d\n", currentMode);
   preferences.end();
 
-  // This is specific to the AirM2M ESP32 board
-  // https://wiki.luatos.com/chips/esp32c3/board.html
+  // 按键/指示灯引脚配置（原 AirM2M C3 板定义；在 S3 上 LED 无板载，BOOT 键=GPIO0）
   pinMode(RIGHT_LED, OUTPUT);
   pinMode(LEFT_LED, OUTPUT);
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+
+  // 板载 RGB (WS2812 @ GPIO48) 模式指示灯
+  initRgb();
+  Serial.println("RGB LED ready");
   
   BLEDevice::init("AirPods 69");
 
@@ -126,6 +132,9 @@ void loop() {
   digitalWrite(LEFT_LED,  shouldBeLitOn(stateTable[currentMode][0])  ? HIGH : LOW);
   digitalWrite(RIGHT_LED, shouldBeLitOn(stateTable[currentMode][1]) ? HIGH : LOW);
 
+  // 刷新板载 RGB 模式指示灯
+  updateRgb(currentMode);
+
   if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
     unsigned long startTime = millis();
     while(digitalRead(BOOT_BUTTON_PIN) == LOW); 
@@ -157,7 +166,7 @@ void loop() {
 
   switch (currentMode){
     case LEFT_OFF_RIGHT_OFF:
-      setAdvertisementData(oAdvertisementData, ALL_DEVICES[AIRPODS]); // This one seems the most spammy
+      setAdvertisementData(oAdvertisementData, ALL_DEVICES[AIRPODS]); // 模式0：固定 AirPods（最轰炸）
       break;
     case LEFT_OFF_RIGHT_FLASH:
     setRandomDeviceData(oAdvertisementData);

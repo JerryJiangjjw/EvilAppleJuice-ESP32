@@ -1,3 +1,5 @@
+#pragma once
+
 enum LEDMode { OFF = 0, FLASH = 1, ON = 2 };
 
 LEDMode stateTable[9][2] = {
